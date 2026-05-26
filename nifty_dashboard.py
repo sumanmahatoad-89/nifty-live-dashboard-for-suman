@@ -5,37 +5,37 @@ import time
 
 # --- 1. LOGIN SECURITY ---
 def check_password():
-    """Returns True if the user had the correct password."""
-    def password_entered():
-        if st.session_state["password"] == st.secrets["PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
-        else:
-            st.session_state["password_correct"] = False
-
     if "password_correct" not in st.session_state:
-        st.text_input("Enter Password", type="password", on_change=password_entered, key="password")
+        st.text_input("Enter Dashboard Password", type="password", on_change=lambda: st.session_state.update({"password_correct": st.session_state["pw_input"] == st.secrets["PASSWORD"]}), key="pw_input")
         return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("Enter Password", type="password", on_change=password_entered, key="password")
-        st.error("😕 Password incorrect")
-        return False
-    else:
-        return True
+    return st.session_state["password_correct"]
 
-# --- 2. DATA FETCHING ---
-headers = {
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
-    'accept-encoding': 'gzip, deflate, br',
-    'accept-language': 'en-US,en;q=0.9'
-}
-
+# --- 2. IMPROVED DATA FETCHING (Stealth Mode) ---
 def get_nse_data():
+    base_url = "https://www.nseindia.com/"
+    # The API URL for Nifty Option Chain
+    api_url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": base_url
+    }
+
     session = requests.Session()
-    session.get("https://www.nseindia.com", headers=headers) # Set cookies
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-    response = session.get(url, headers=headers).json()
-    return response
+    # Step A: Visit the home page first to get cookies
+    session.get(base_url, headers=headers, timeout=10)
+    
+    # Step B: Now fetch the actual data
+    response = session.get(api_url, headers=headers, timeout=10)
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        # This helps us see if we are being blocked (403)
+        st.error(f"NSE Error Code: {response.status_code}. The site is blocking the server.")
+        return None
 
 # --- 3. DASHBOARD UI ---
 if check_password():
@@ -44,40 +44,39 @@ if check_password():
 
     try:
         data = get_nse_data()
-        underlying_price = data['records']['underlyingValue']
-        timestamp = data['records']['timestamp']
-        
-        # Metrics Row
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Nifty Spot", underlying_price)
-        col2.metric("Last Updated", timestamp)
-        
-        # Option Chain Processing
-        records = data['filtered']['data']
-        oc_list = []
-        for r in records:
-            oc_list.append({
-                'Strike': r['strikePrice'],
-                'CE OI': r['CE']['openInterest'] if 'CE' in r else 0,
-                'CE CHG OI': r['CE']['changeinOpenInterest'] if 'CE' in r else 0,
-                'CE LTP': r['CE']['lastPrice'] if 'CE' in r else 0,
-                'PE LTP': r['PE']['lastPrice'] if 'PE' in r else 0,
-                'PE CHG OI': r['PE']['changeinOpenInterest'] if 'PE' in r else 0,
-                'PE OI': r['PE']['openInterest'] if 'PE' in r else 0,
-            })
-        
-        df = pd.DataFrame(oc_list)
-        
-        # Filter for ATM strikes (optional)
-        atm_strike = round(underlying_price / 50) * 50
-        df = df[(df['Strike'] >= atm_strike - 500) & (df['Strike'] <= atm_strike + 500)]
-
-        # Highlight ATM
-        st.table(df.style.highlight_max(axis=0, subset=['CE OI', 'PE OI'], color='#f8d7da'))
-        
-        if st.button("Refresh Data"):
-            st.rerun()
+        if data:
+            underlying_price = data['records']['underlyingValue']
+            timestamp = data['records']['timestamp']
+            
+            # Show stats
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Nifty Spot", f"₹{underlying_price}")
+            c2.metric("Last Updated", timestamp)
+            
+            # Process Data
+            records = data['filtered']['data']
+            oc_data = []
+            for r in records:
+                row = {'Strike': r['strikePrice']}
+                if 'CE' in r:
+                    row.update({'CE_OI': r['CE']['openInterest'], 'CE_CHG': r['CE']['changeinOpenInterest'], 'CE_LTP': r['CE']['lastPrice']})
+                if 'PE' in r:
+                    row.update({'PE_LTP': r['PE']['lastPrice'], 'PE_CHG': r['PE']['changeinOpenInterest'], 'PE_OI': r['PE']['openInterest']})
+                oc_data.append(row)
+            
+            df = pd.DataFrame(oc_data)
+            
+            # Filter to show strikes near current price
+            atm_strike = round(underlying_price / 50) * 50
+            df = df[(df['Strike'] >= atm_strike - 300) & (df['Strike'] <= atm_strike + 300)]
+            
+            # Stylized Table
+            st.dataframe(df.style.background_gradient(subset=['CE_OI', 'PE_OI'], cmap='YlGn'), use_container_width=True)
+            
+            if st.button("Manual Refresh"):
+                st.rerun()
+        else:
+            st.warning("Could not fetch data. Check if market is open (9:15 AM - 3:30 PM IST).")
             
     except Exception as e:
-        st.error(f"Waiting for NSE Data... (Market might be closed or API limited)")
-        time.sleep(5)
+        st.error(f"Error occurred: {str(e)}")
